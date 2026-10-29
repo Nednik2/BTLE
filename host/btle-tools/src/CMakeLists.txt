@@ -50,6 +50,10 @@ if(MSVC)
 LIST(APPEND TOOLS_LINK_LIBS libgetopt_static)
 endif()
 
+if(WIN32)
+LIST(APPEND TOOLS_LINK_LIBS ws2_32)
+endif()
+
 target_link_libraries(btle_tx ${TOOLS_LINK_LIBS} m)
 
 IF (USE_BLADERF MATCHES 1)

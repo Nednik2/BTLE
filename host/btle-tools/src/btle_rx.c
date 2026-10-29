@@ -24,7 +24,11 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <netinet/in.h>
+#endif
 
 //----------------------------------some sys stuff----------------------------------
 #ifndef bool
@@ -35,6 +39,7 @@ typedef int bool;
 
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
 
 #ifdef _MSC_VER
 
@@ -165,8 +170,27 @@ static int parse_pdu_type_csv(const char *s, uint16_t *mask) {
 }
 
 void init_pcap_file() {
+#ifdef _WIN32
+    // Live capture into Wireshark: create a named pipe server (wireshark -k -i \\.\pipe\NAME)
+    if (strncmp(filename_pcap, "\\\\.\\pipe\\", 9) == 0) {
+        HANDLE hpipe = CreateNamedPipeA(filename_pcap, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT,
+                                        1, 65536, 65536, 0, NULL);
+        if (hpipe == INVALID_HANDLE_VALUE) {
+            fprintf(stderr, "CreateNamedPipe(%s) failed: %lu\n", filename_pcap, GetLastError());
+            exit(1);
+        }
+        fprintf(stderr, "Waiting for Wireshark on %s ...\n", filename_pcap);
+        if (!ConnectNamedPipe(hpipe, NULL) && GetLastError() != ERROR_PIPE_CONNECTED) {
+            fprintf(stderr, "ConnectNamedPipe failed: %lu\n", GetLastError());
+            exit(1);
+        }
+        fprintf(stderr, "Wireshark connected\n");
+        fh_pcap_store = _fdopen(_open_osfhandle((intptr_t)hpipe, _O_WRONLY | _O_BINARY), "wb");
+    } else
+#endif
     fh_pcap_store = fopen(filename_pcap, "wb");
     fwrite(PCAP_HDR_TCPDUMP, 1, PCAP_HDR_TCPDUMP_LEN, fh_pcap_store);
+    fflush(fh_pcap_store);
 }
 
 typedef struct {
@@ -200,10 +224,14 @@ void write_packet_to_file(FILE *fh, int packet_len, uint8_t *packet, uint8_t cha
        else if (rssi_dbm < -126) sig_power = -126;
        else sig_power = (int8_t)rssi_dbm;
    }
-   uint8_t header_btle[10] = {channel, (uint8_t)sig_power, 0, 0, 0, 0, 0, 0, 1, 0};
+   // DLT_BLUETOOTH_LE_LL_WITH_PHDR wants the RF channel (0 = 2402MHz), not the BLE channel index
+   uint8_t rf_channel = (channel == 37) ? 0 : (channel == 38) ? 12 : (channel == 39) ? 39 :
+                        (channel <= 10) ? channel + 1 : channel + 2;
+   uint8_t header_btle[10] = {rf_channel, (uint8_t)sig_power, 0, 0, 0, 0, 0, 0, 1, 0};
    fwrite(header_btle, 1, 10, fh);
    fwrite(&access_addr, 1, 4, fh);
    fwrite(packet, 1, packet_len, fh);
+   fflush(fh);
 }
 void write_dummy_entry(){
     uint8_t pkt[10] = {7,7,7,7,7,7,7,7,7,7};
@@ -2359,7 +2387,7 @@ void receiver(IQ_TYPE *rxp_in, int buf_len, int channel_number, uint32_t access_
 
     // -------- packet survived filters: write/print/emit --------
     if (filename_pcap != NULL)
-      write_packet_to_file(fh_pcap_store, payload_len+2, tmp_byte, channel_number, access_addr, rssi_dbm);
+      write_packet_to_file(fh_pcap_store, payload_len+2+3, tmp_byte, channel_number, access_addr, rssi_dbm); // header + payload + CRC
 
     if (!quiet_text_flag) {
       printf("%07dus Pkt%03d Ch%d AA:%08x ", time_diff, pkt_count, channel_number, access_addr);
